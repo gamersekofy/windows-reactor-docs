@@ -1,136 +1,200 @@
-# Getting Started
+# 1. Getting Started
 
-## Dependencies
+This chapter gets a Reactor window on screen and explains the pieces Cargo needs to make that
+work.
+
+## Prerequisites
+
+| Requirement | Notes |
+| --- | --- |
+| Windows 10 version 1809 or newer | Windows 11 recommended |
+| Rust 1.95+ with edition 2024 | `rustup update stable` |
+| Windows App Runtime | Installed by most Windows App SDK apps; Reactor shows an install prompt if it is missing |
+| MSVC toolchain | `x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc` |
+
+Reactor links WinUI 3 directly. It does not use `windows` crate bindings in your code — the
+`windows_reactor` prelude re-exports every control, enum, and helper you need.
+
+## Add the dependency
+
+For the latest published preview:
 
 ```toml
 [dependencies]
-windows-reactor = { git = "https://github.com/microsoft/windows-rs" }
-
-[build-dependencies]
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs" }
+windows-reactor = "0.100"
 ```
 
-- The crate lives at **`crates/libs/reactor`** inside the windows-rs repo (not
-  `crates/windows-reactor`, which doesn't exist).
-- `windows-reactor-setup` is a **build-time** helper that stages Windows App
-  Runtime files next to your executable.
+These chapters describe the newer `master` API. To pin exactly the revision they were verified
+against:
 
-## Build Script (`build.rs`)
+```toml
+[dependencies]
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "9769d429fa2bd3a8b5641443c080aa6f166d342e" }
+```
 
-Cargo automatically runs `build.rs` at the project root before compiling.
+If you pin a git revision, run `cargo update -p windows-reactor` after changing the revision;
+Cargo keeps the previous checkout until the lockfile changes.
 
-```rust
-// Framework-dependent: ~2.7 MB, requires runtime installed on target machine
-fn main() {
-    windows_reactor_setup::as_framework_dependent();
-}
+## Runtime deployment
 
-// Self-contained: ~55 MB, no runtime needed on target machine
+By default an app is **framework-dependent**: it uses the Windows App Runtime already installed
+on the machine. No build script is required. Reactor looks for Windows App Runtime `2.6.4` (or
+newer in the same family) at startup and displays an install dialog if it cannot find one.
+
+To ship the runtime with your app, add the setup crate as a build dependency:
+
+```toml
+[build-dependencies]
+windows-reactor-setup = "0.100"
+```
+
+and call it from `build.rs`:
+
+```rust,ignore
 fn main() {
     windows_reactor_setup::as_self_contained();
 }
 ```
 
-Framework-dependent apps also need an explicit bootstrap handle held alive for
-the lifetime of the process:
+The build script stages the runtime files next to the executable. Distribute that whole output
+directory, not just the `.exe`. Self-contained builds are larger but do not require a system-wide
+runtime install.
 
-```rust
-fn main() -> windows_core::Result<()> {
-    let _bootstrap_handle = windows_reactor::bootstrap::initialize()?;
-    App::new().render(...)
-}
-```
+Keep the setup crate's version aligned with the Reactor version you use. A mismatch produces a
+runtime version conflict at startup rather than a compile error.
 
-## Entry Point
+## The three entry points
+
+| Function | Use it for |
+| --- | --- |
+| `App::run_component::<C>(input)` | One window driven by one component |
+| `App::run_component_with_policy::<C>(input, policy)` | One window with a title, theme, and size |
+| `App::run_application::<A>(input)` | An application root that owns multiple windows and tray icons |
+
+All three return `Result<()>`, so `main` can return the error directly or call
+`.unwrap()`.
+
+## A first window
 
 ```rust
 use windows_reactor::*;
 
-fn main() -> Result<()> {
-    App::new()
-        .title("My App")
-        .inner_size(1200.0, 800.0)
-        .backdrop(Backdrop::Mica)
-        .eager_templated_realization(true)
-        .render(shell)
+struct Hello;
+
+impl Component for Hello {
+    type Input = ();
+    type Message = ();
+
+    fn create(_input: &(), _context: &ComponentContext<Self>) -> Self {
+        Self
+    }
+
+    fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
+        context.window_frame(
+            "Hello, Reactor",
+            StackPanel::new()
+                .spacing(8.0)
+                .children((TextBlock::new().text("Hello, world."),)),
+        )
+    }
+}
+
+fn main() {
+    App::run_component::<Hello>(()).unwrap();
 }
 ```
 
-### `App` builder options
+`window_frame` is a convenience: it sets the window title and wraps your content in a `Grid` with
+a `TitleBar` in row 0 and your content in row 1. Use `context.window_title(...)` plus a plain view
+if you want to draw your own title area.
 
-| Method | Description |
-|--------|-------------|
-| `.title(impl Into<String>)` | Window title |
-| `.inner_size(w, h)` | Initial window size in DIPs |
-| `.backdrop(Backdrop)` | `Mica`, `Acrylic`, or `Default` |
-| `.presenter(PresenterKind)` | Window presenter — see below |
-| `.fullscreen(bool)` | Shortcut for `presenter(FullScreen)` / back to `Default` |
-| `.eager_templated_realization(bool)` | **See below** |
-| `.render(fn)` | Register a render function (see below) |
-| `.run(factory)` | Register a full `Component` factory |
+`create` runs once. `view` runs whenever state changes. Chapter 2 covers the full lifecycle.
 
-### Window types (`PresenterKind`)
+## Setting the window policy
 
-Three window presentation modes are supported:
-
-| Variant | Description |
-|---------|-------------|
-| `PresenterKind::Default` | Standard floating, resizable window (the default) |
-| `PresenterKind::FullScreen` | Fullscreen window |
-| `PresenterKind::CompactOverlay` | Always-on-top compact window (picture-in-picture style, like a mini-player) |
+`WindowPolicy` controls the native window before the component is created:
 
 ```rust
-App::new().presenter(PresenterKind::CompactOverlay)
+use windows_reactor::*;
 
-// or the fullscreen convenience shortcut:
-App::new().fullscreen(true)  // → FullScreen
-App::new().fullscreen(false) // → Default
-```
+struct Counter {
+    count: u32,
+}
 
-### ⚠️ The `render` function signature trap
+impl Component for Counter {
+    type Input = ();
+    type Message = ();
 
-`App::render()` requires:
+    fn create(_input: &(), _context: &ComponentContext<Self>) -> Self {
+        Self { count: 0 }
+    }
 
-```rust
-pub fn render<F>(self, f: F) -> Result<()>
-where
-    F: Fn(&mut RenderCx) -> Element + Send + 'static,
-```
+    fn update(&mut self, _message: (), _context: &ComponentContext<Self>) {
+        self.count += 1;
+    }
 
-It wants a concrete **`Element`**, *not* `impl Into<Element>` — even though the
-official intro post and some docs show the latter. The result is error E0271:
+    fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
+        StackPanel::new()
+            .spacing(8.0)
+            .children((
+                TextBlock::new().text(format!("Count: {}", self.count)),
+                Button::new()
+                    .on_click(context.forward())
+                    .content("Increment"),
+            ))
+            .into()
+    }
+}
 
-```
-expected `app` to return `Element`, but it returns `impl Into<Element>`
-```
+fn main() {
+    let policy = WindowPolicy::new()
+        .title("Counter")
+        .theme(WindowTheme::Dark)
+        .client_size(420.0, 240.0)
+        .minimum_client_size(320.0, 200.0);
 
-**The fix:** return `Element` and end your builder chain with `.into()`:
-
-```rust
-fn app(cx: &mut RenderCx) -> Element {   // ← Element, not impl Into<Element>
-    vstack((text_block("Hi"),)).into()   // ← .into() at the end
+    App::run_component_with_policy::<Counter>((), policy).unwrap();
 }
 ```
 
-### ⚠️ `eager_templated_realization(true)`
+`WindowPolicy` supports `title`, `theme`, `client_size`, and `minimum_client_size`. For backdrop,
+icon, initial position, and placement constraints, use `WindowVisuals` from inside the component
+instead — see [Windows and Applications](10-windows-and-applications.md).
 
-WinUI's `ListView`/`GridView` virtualize items — they create rows lazily based
-on their measured size. Inside a `NavigationView`, the content area's size is
-determined late in the layout pass, and the lazy list may never receive the
-signal to realize its items. Result: **the list renders as an empty box** (or
-not at all) with zero errors.
+## Hide the console window
 
-Set `.eager_templated_realization(true)` on `App` to force all items to be
-created immediately. The gallery app does this. **Always enable it** if you use
-templated lists.
+Add this to the top of `main.rs` when you build a release app:
 
-## Where to Find API Documentation
+```rust
+#![windows_subsystem = "windows"]
+```
 
-The best "documentation" is the crate source:
+Leave it off while developing so `println!` and panic messages remain visible in the terminal.
 
-- **Widgets:** `crates/libs/reactor/src/core/widgets/<widget>.rs` — one file per
-  widget containing the struct, all builder methods, and the factory function.
-- **Element enum:** `crates/libs/reactor/src/core/element.rs` — the `define_element!`
-  macro lists every widget variant.
-- **Hooks:** `crates/libs/reactor/src/core/render_context.rs`
-- **Samples:** `crates/samples/reactor/` — `gallery`, `minimal`, plus example files.
+## Suggested project layout
+
+```text
+my-app/
+  Cargo.toml
+  build.rs            # only for self-contained builds
+  src/
+    main.rs
+    components/
+      mod.rs
+```
+
+Reactor components are ordinary Rust types. Put each component in its own module and export the
+ones `main` needs. A single `main.rs` is fine for small samples.
+
+## Troubleshooting startup
+
+| Symptom | Likely cause |
+| --- | --- |
+| Install prompt at startup | Windows App Runtime is missing; install it or switch to a self-contained build |
+| `STATUS_DLL_NOT_FOUND` before `main` | Self-contained output directory was copied incompletely |
+| Linker error mentioning `Microsoft.ui.xaml.dll` | Runtime and app target architectures do not match |
+| Panic in `bootstrap` | Installed runtime is older than the version Reactor requires |
+| Window flashes and closes | `main` returned an error; remove `#![windows_subsystem = "windows"]` to see it |
+
+Next: [Components](02-components.md) explains what happens between `create`, `update`, and
+`view`.
